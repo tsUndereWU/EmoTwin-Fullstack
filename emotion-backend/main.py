@@ -26,49 +26,67 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 1. НАСТРОЙКА БАЗЫ ДАННЫХ (MSSQL)
+# 1. НАСТРОЙКА БАЗЫ ДАННЫХ (УНИВЕРСАЛЬНАЯ: MSSQL / PostgreSQL)
 # ==========================================
 
-DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
-SERVER = os.getenv("DB_SERVER", "localhost")
-DATABASE = os.getenv("DB_NAME", "EmotionDB")
-USER = os.getenv("DB_USER", "sa")
-PASSWORD = os.getenv("DB_PASSWORD", "")
-PORT = os.getenv("DB_PORT", "1433")
+# Проверяем, есть ли переменная окружения от облачного провайдера (Render/Railway)
+CLOUD_DB_URL = os.getenv("DATABASE_URL")
 
-# Корректное формирование строки подключения без дублирования
-if PORT and PORT != "0":
-    DATABASE_URL = f"mssql+pyodbc://{USER}:{PASSWORD}@{SERVER},{PORT}/{DATABASE}?driver={DRIVER.replace(' ', '+')}"
+if CLOUD_DB_URL:
+    # РЕЖИМ ПРОДАКШНА (PostgreSQL)
+    # Render отдает 'postgres://', SQLAlchemy требует 'postgresql://'
+    if CLOUD_DB_URL.startswith("postgres://"):
+        DATABASE_URL = CLOUD_DB_URL.replace("postgres://", "postgresql://", 1)
+    else:
+        DATABASE_URL = CLOUD_DB_URL
+
+    logger.info("Using Cloud PostgreSQL connection")
+
 else:
-    DATABASE_URL = f"mssql+pyodbc://{USER}:{PASSWORD}@{SERVER}/{DATABASE}?driver={DRIVER.replace(' ', '+')}"
+    # РЕЖИМ ЛОКАЛЬНОЙ РАЗРАБОТКИ (MSSQL)
+    DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
+    SERVER = os.getenv("DB_SERVER", "localhost")
+    DATABASE = os.getenv("DB_NAME", "EmotionDB")
+    USER = os.getenv("DB_USER", "sa")
+    PASSWORD = os.getenv("DB_PASSWORD", "")
+    PORT = os.getenv("DB_PORT", "1433")
+
+    if PORT and PORT != "0":
+        DATABASE_URL = f"mssql+pyodbc://{USER}:{PASSWORD}@{SERVER},{PORT}/{DATABASE}?driver={DRIVER.replace(' ', '+')}"
+    else:
+        DATABASE_URL = f"mssql+pyodbc://{USER}:{PASSWORD}@{SERVER}/{DATABASE}?driver={DRIVER.replace(' ', '+')}"
+
+    logger.info(f"Using local MSSQL connection: {SERVER}")
 
 try:
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-    logger.info(f"Database engine created successfully! Target: {SERVER}")
+    logger.info("Database engine created successfully!")
 except Exception as e:
     logger.error(f"Failed to create DB engine: {e}")
     engine = None
 
 Base = declarative_base()
 
+
 # Модель таблицы истории анализов
 class AnalysisHistory(Base):
     __tablename__ = "analysis_history"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(100), nullable=False, index=True)
     text = Column(Text, nullable=False)
     sentiment = Column(String(20), nullable=False)
     score = Column(Float, nullable=False)
     emoji = Column(String(10))
-    triggers = Column(Text, nullable=True)      # JSON массив триггеров
-    advice = Column(Text, nullable=True)         # Персонализированный совет
+    triggers = Column(Text, nullable=True)  # JSON массив триггеров
+    advice = Column(Text, nullable=True)  # Персонализированный совет
     timestamp = Column(DateTime, default=datetime.utcnow)
+
 
 # Модель таблицы базы знаний
 class AdviceKnowledgeBase(Base):
     __tablename__ = "advice_knowledge_base"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     category_name = Column(String(50), nullable=False, unique=True)
     category_title = Column(String(100), nullable=False)
@@ -80,7 +98,8 @@ class AdviceKnowledgeBase(Base):
     is_active = Column(Integer, default=1)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# Создаем/проверяем таблицы
+
+# Создаем/проверяем таблицы (работает и для MSSQL, и для Postgres)
 if engine:
     try:
         Base.metadata.create_all(engine)
@@ -90,13 +109,14 @@ if engine:
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) if engine else None
 
+
 # ==========================================
 # 2. NLP ДВИЖОК: ТРИГГЕРЫ + СОВЕТЫ ИЗ БД
 # ==========================================
 
 class EmotionalAdvisor:
-    """Загружает базу знаний из MSSQL при старте приложения"""
-    
+    """Загружает базу знаний из БД при старте приложения"""
+
     def __init__(self):
         self.kw_model = KeyBERT(model='cointegrated/rubert-tiny2')
         self.yake_extractor = yake.KeywordExtractor(lan="ru", n=3, dedupLim=0.9)
@@ -104,17 +124,17 @@ class EmotionalAdvisor:
         self._load_knowledge_base()
 
     def _load_knowledge_base(self):
-        """Загружает активные категории советов из MSSQL"""
+        """Загружает активные категории советов из БД"""
         if not SessionLocal:
             logger.warning("DB not available, using empty knowledge base")
             return
-            
+
         db = SessionLocal()
         try:
             rows = db.query(AdviceKnowledgeBase).filter(
                 AdviceKnowledgeBase.is_active == 1
             ).order_by(AdviceKnowledgeBase.priority.desc()).all()
-            
+
             self.knowledge_base = [
                 {
                     "category": row.category_name,
@@ -135,16 +155,16 @@ class EmotionalAdvisor:
 
     def extract_triggers(self, text: str) -> list[str]:
         """Извлекает ключевые слова-триггеры из текста с надежным фолбэком"""
-        if len(text.strip()) < 5: 
+        if len(text.strip()) < 5:
             return []
-            
+
         # Расширенный список стоп-слов
-        stop_words = {"и", "в", "не", "на", "я", "что", "это", "как", "то", "но", 
+        stop_words = {"и", "в", "не", "на", "я", "что", "это", "как", "то", "но",
                       "он", "она", "мы", "вы", "они", "с", "у", "о", "из", "по", "для",
                       "завтра", "сдавать", "ничего", "каждой", "боюсь", "а", "же", "ли", "бы"}
-        
+
         raw_triggers = []
-        
+
         # Попытка 1: KeyBERT
         try:
             keywords = self.kw_model.extract_keywords(
@@ -167,7 +187,7 @@ class EmotionalAdvisor:
             words = [w.strip(".,!?;:") for w in text.split() if len(w) > 3 and w.lower() not in stop_words]
             raw_triggers = words[:3]
 
-        # ОЧИСТКА ТРИГГЕРОВ (исправлено: теперь код выполняется ДО return)
+        # ОЧИСТКА ТРИГГЕРОВ
         cleaned_triggers = []
         for t in raw_triggers:
             words = t.split()
@@ -176,7 +196,7 @@ class EmotionalAdvisor:
                 cleaned_triggers.append(" ".join(meaningful))
             elif len(t) > 3:
                 cleaned_triggers.append(t)
-                
+
         return cleaned_triggers[:3]
 
     def generate_advice(self, sentiment: str, triggers: list[str]) -> str:
@@ -205,22 +225,22 @@ class EmotionalAdvisor:
         # Поиск лучшей категории для негативных эмоций
         best_index = -1
         max_weighted_score = -1
-        
+
         # Категории с абсолютным приоритетом (побеждают всегда при наличии совпадения)
         CRITICAL_CATEGORIES = {
-            "suicidal_thoughts", "self_harm", "panic_attack", 
+            "suicidal_thoughts", "self_harm", "panic_attack",
             "derealization", "exam_stress", "school_problems"
         }
-        
+
         for i, cat in enumerate(self.knowledge_base):
             raw_score = find_match_score(cat)
             if raw_score > 0:
                 weighted_score = raw_score * cat["priority"]
-                
+
                 # Абсолютный бонус для критических состояний
                 if cat["category"] in CRITICAL_CATEGORIES:
                     weighted_score += 100
-                
+
                 if weighted_score > max_weighted_score:
                     max_weighted_score = weighted_score
                     best_index = i
@@ -238,8 +258,10 @@ class EmotionalAdvisor:
             f"Повторите 4 цикла для переключения нервной системы."
         )
 
+
 # Глобальный экземпляр советника
 advisor = EmotionalAdvisor()
+
 
 # ==========================================
 # 3. МОДЕЛИ ДАННЫХ API
@@ -249,19 +271,23 @@ class TextRequest(BaseModel):
     text: str
     user_id: Optional[str] = "default"
 
+
 # ==========================================
 # 4. FASTAPI ПРИЛОЖЕНИЕ
 # ==========================================
 
 app = FastAPI(
     title="EmoTwin: AI Mental Health Companion",
-    description="API с объяснимым анализом эмоций, триггерами и персонализированными советами на основе MSSQL Knowledge Base",
-    version="4.0.0"
+    description="API с объяснимым анализом эмоций, триггерами и персонализированными советами",
+    version="5.0.0"
 )
+
+# CORS для продакшна (добавьте сюда домен Vercel после деплоя)
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -272,7 +298,7 @@ logger.info("Loading sentiment analysis model...")
 try:
     sentiment_pipeline = pipeline(
         "sentiment-analysis",
-        model="blanchefort/rubert-base-cased-sentiment", 
+        model="blanchefort/rubert-base-cased-sentiment",
         device=-1
     )
     logger.info("Model loaded successfully!")
@@ -280,13 +306,14 @@ except Exception as e:
     logger.error(f"Error loading model: {e}")
     sentiment_pipeline = None
 
+
 # ==========================================
 # 5. ФУНКЦИИ РАБОТЫ С БД
 # ==========================================
 
-def add_to_history_db(user_id: str, text: str, sentiment: str, score: float, 
+def add_to_history_db(user_id: str, text: str, sentiment: str, score: float,
                       emoji: str, triggers: list, advice: str):
-    if not SessionLocal: 
+    if not SessionLocal:
         return
     db = SessionLocal()
     try:
@@ -308,15 +335,16 @@ def add_to_history_db(user_id: str, text: str, sentiment: str, score: float,
     finally:
         db.close()
 
+
 def get_history_db(user_id: str, limit: int = 20):
-    if not SessionLocal: 
+    if not SessionLocal:
         return []
     db = SessionLocal()
     try:
         items = db.query(AnalysisHistory).filter(
             AnalysisHistory.user_id == user_id
         ).order_by(AnalysisHistory.timestamp.desc()).limit(limit).all()
-        
+
         return [
             {
                 "id": item.id,
@@ -333,6 +361,7 @@ def get_history_db(user_id: str, limit: int = 20):
     finally:
         db.close()
 
+
 # ==========================================
 # 6. ЭНДПОИНТЫ
 # ==========================================
@@ -340,37 +369,38 @@ def get_history_db(user_id: str, limit: int = 20):
 @app.get("/")
 def root():
     return {
-        "message": "EmoTwin API v4.0 with Data-Driven Explainable AI is running!", 
+        "message": "EmoTwin API v5.0 with Universal DB Support is running!",
         "status": "online",
         "knowledge_base_size": len(advisor.knowledge_base)
     }
+
 
 @app.post("/analyze")
 async def analyze_text(request: TextRequest):
     """Анализирует текст, находит триггеры и дает персонализированный совет из БД"""
     if not request.text or len(request.text.strip()) == 0:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
-    
+
     if sentiment_pipeline is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
-    
+
     try:
         text = request.text[:512]
-        
+
         # 1. Анализ тональности
         result = sentiment_pipeline(text)[0]
         label = result['label'].upper()
         sentiment = label.lower()
         score = result['score']
-        
+
         emoji_map = {'POSITIVE': '😊', 'NEGATIVE': '', 'NEUTRAL': '😐'}
         emoji = emoji_map.get(label, '😐')
-        
+
         # 2. Извлечение триггеров и генерация совета из БД
         triggers = advisor.extract_triggers(text)
         advice = advisor.generate_advice(sentiment, triggers)
-        
-        # 3. Сохранение в MSSQL
+
+        # 3. Сохранение в БД
         add_to_history_db(
             user_id=request.user_id,
             text=text,
@@ -380,10 +410,10 @@ async def analyze_text(request: TextRequest):
             triggers=triggers,
             advice=advice
         )
-        
+
         # 4. Чтение истории
         history = get_history_db(request.user_id, limit=10)
-        
+
         return {
             "result": {
                 "sentiment": sentiment,
@@ -396,10 +426,11 @@ async def analyze_text(request: TextRequest):
             "history": history,
             "total_analyzed": len(history)
         }
-        
+
     except Exception as e:
         logger.error(f"Error analyzing text: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/history/{user_id}")
 async def get_history(user_id: str, limit: int = 20):
@@ -409,6 +440,7 @@ async def get_history(user_id: str, limit: int = 20):
         "total": len(history),
         "history": history
     }
+
 
 @app.delete("/history/{user_id}")
 async def clear_history(user_id: str):
@@ -425,12 +457,13 @@ async def clear_history(user_id: str):
     finally:
         db.close()
 
+
 @app.get("/stats/{user_id}")
 async def get_user_stats(user_id: str):
     """Статистика эмоций пользователя"""
     if not SessionLocal:
         raise HTTPException(status_code=503, detail="Database connection failed")
-    
+
     db = SessionLocal()
     try:
         total_count = db.query(AnalysisHistory).filter(
@@ -440,9 +473,12 @@ async def get_user_stats(user_id: str):
         if total_count == 0:
             return {"user_id": user_id, "message": "No data", "total_analyses": 0}
 
-        pos = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id, AnalysisHistory.sentiment == 'positive').count()
-        neg = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id, AnalysisHistory.sentiment == 'negative').count()
-        neu = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id, AnalysisHistory.sentiment == 'neutral').count()
+        pos = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id,
+                                               AnalysisHistory.sentiment == 'positive').count()
+        neg = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id,
+                                               AnalysisHistory.sentiment == 'negative').count()
+        neu = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id,
+                                               AnalysisHistory.sentiment == 'neutral').count()
         avg_conf = db.query(func.avg(AnalysisHistory.score)).filter(AnalysisHistory.user_id == user_id).scalar()
 
         return {
@@ -461,6 +497,7 @@ async def get_user_stats(user_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
 
 @app.get("/admin/advice")
 async def get_all_advice():
@@ -486,11 +523,13 @@ async def get_all_advice():
     finally:
         db.close()
 
+
 @app.post("/admin/reload-advice")
 async def reload_advice():
     """Перезагрузить базу знаний из БД без рестарта сервера"""
     advisor._load_knowledge_base()
     return {"message": "Knowledge base reloaded", "categories": len(advisor.knowledge_base)}
+
 
 # ==========================================
 # 7. ЗАПУСК
@@ -498,4 +537,7 @@ async def reload_advice():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    # Используем порт из переменной окружения (для Render) или 8000 по умолчанию
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
