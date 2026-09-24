@@ -1,6 +1,6 @@
 // src/App.js
 import React, { useState } from 'react';
-import axios from 'axios';
+import { analyzeText } from './api'; // Импортируем нашу функцию
 import './App.css';
 
 function App() {
@@ -8,7 +8,6 @@ function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
   const userId = "user_moscow_it"; 
 
   const handleAnalyze = async () => {
@@ -19,16 +18,12 @@ function App() {
     setResult(null);
 
     try {
-      // Используем localhost для надежности
-      const response = await axios.post('http://localhost:8000/analyze', {
-        text: text,
-        user_id: userId
-      });
-      
-      setResult(response.data.result);
+      // Теперь используем универсальную функцию
+      const data = await analyzeText(text, userId);
+      setResult(data.result); // Обратите внимание: ответ приходит в поле result
     } catch (err) {
       console.error(err);
-      setError('Ошибка соединения с сервером. Убедитесь, что бекенд запущен на порту 8000.');
+      setError('Не удалось связаться с сервером. Попробуйте позже.');
     } finally {
       setLoading(false);
     }
@@ -36,42 +31,49 @@ function App() {
 
   return (
     <div className="app-container">
-      <header className="header">
+      <header className="app-header">
         <h1>🧠 EmoTwin</h1>
         <p>Ваш персональный AI-компаньон для ментального здоровья</p>
       </header>
 
-      {/* Добавили обертку input-area, чтобы стили сработали */}
-      <div className="input-area">
-        <textarea 
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Опишите, что вы чувствуете или что произошло сегодня..."
-        />
-        <button onClick={handleAnalyze} disabled={loading}>
-          {loading ? 'Анализирую...' : 'Получить поддержку'}
-        </button>
-      </div>
-
-      {error && <p style={{color: 'red', textAlign: 'center'}}>{error}</p>}
-
-      {result && (
-        <div className="result-card">
-          <h2>Результат анализа</h2>
-          <p><strong>Эмоция:</strong> {result.emoji} {result.sentiment.toUpperCase()} ({result.confidence}%)</p>
-          
-          <div className="triggers-list">
-            {result.triggers.map((trigger, index) => (
-              <span key={index} className="trigger-tag">#{trigger}</span>
-            ))}
-          </div>
-
-          <div className="advice-block">
-            <h3>💡 Рекомендация:</h3>
-            <p className="advice-text">{result.personalized_advice}</p>
-          </div>
+      <main className="main-content">
+        <div className="input-section">
+          <textarea
+            placeholder="Опишите, что вас беспокоит или радует..."
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            rows="4"
+          />
+          <button onClick={handleAnalyze} disabled={loading || !inputText.trim()}>
+            {loading ? 'Анализирую...' : 'Получить поддержку'}
+          </button>
         </div>
-      )}
+
+        {error && <div className="error-message">{error}</div>}
+
+        {result && (
+          <div className="result-card">
+            <div className="emotion-header">
+              <span className="emoji-large">{result.emoji}</span>
+              <h2>{result.sentiment === 'positive' ? 'Позитивный настрой' : result.sentiment === 'negative' ? 'Тревожное состояние' : 'Нейтральное состояние'}</h2>
+            </div>
+            
+            <div className="triggers-section">
+              <h3>Выявленные триггеры:</h3>
+              <div className="tags">
+                {result.triggers.map((tag, index) => (
+                  <span key={index} className="tag">{tag}</span>
+                ))}
+              </div>
+            </div>
+
+            <div className="advice-section">
+              <h3> Персональная рекомендация:</h3>
+              <p className="advice-text">{result.personalized_advice}</p>
+            </div>
+          </div>
+        )}
+      </main>
     </div>
   );
 }
